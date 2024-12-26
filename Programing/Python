@@ -1,1 +1,238 @@
+import matplotlib.pyplot as plt
+
+import krpc
+import time
+import csv
+import math
+
+
+m0 = 283000 # стартовая масса ракеты в кг
+# время взлета - 260с
+n = 250000 / 260 # расход топлива в секунду ~961.5385 кг/с
+Ft = 906500 * 4 + 843000 # сила тяги двигателей
+def p(h): #функция возвращает плотность от высоты
+    dict = {
+    0: 1.225,
+    2500: 0.898,
+    5000: 0.642,
+    7500: 0.446,
+    10_000: 0.288,
+    15_000: 0.108,
+    20_000: 0.040,
+    25_000: 0.035,
+    30_000: 0.015,
+    40_000: 0.001,
+    50_000: 0,
+    60_000: 0,
+    70_000: 0
+    }
+    keys = list(dict.keys())
+    for i in range(len(keys) - 1):
+        if keys[i] <= h and h <= keys[i + 1]:
+            if abs(keys[i] - h) <= abs(keys[i + 1] - h):
+                return dict[keys[i]]
+            else:
+                return dict[keys[i + 1]]
+    return dict[70_000]
+
+def g(h):
+    G = 6.67430 * 10 ** -11 #гравитационная постоянная м**3*с**-2*кг**-1
+    Mz = 5.9742 * 10 ** 24 # масса земли в кг
+    Rz = 6378000 # радиус земли в м
+    return G * Mz / (Rz + h) ** 2
+
+h_x = 0
+h_y = 0
+s = ((1.2 + 1.85 + 1.85) / 2) ** 2 * math.pi # площадь основания
+u_y = 0
+u_x = 0
+u = math.sqrt(u_x ** 2 + u_y ** 2) # модуль скорости
+t = 0
+
+h0 = math.sqrt(h_x ** 2 + h_y ** 2) #высота подъема
+u = math.sqrt(u_x ** 2 + u_y ** 2) # модуль скорости
+
+def F_sopr(h, u): # сила сопротивления воздуха
+    Cf = 0.48
+    return 0.5 * p(h) * (u ** 2) * Cf * s
+
+
+u_l = []
+h_l = []
+t_l = []
+
+
+while h0 <= 28000:
+    t += 1
+    a_x = (Ft * 0 - F_sopr(h0, u_x) - m0 * g(h0) * 0) / m0 * 0
+    a_y = (Ft * 1 - F_sopr(h0, u_y) - m0 * g(h0) * 1) / m0
+    u_x += a_x
+    u_y += a_y
+    h_x = h_x + u_x + a_x/2
+    h_y = h_y + u_y + a_y / 2
+
+    u = math.sqrt(u_x ** 2 + u_y ** 2)
+    h0 = math.sqrt(h_x ** 2 + h_y ** 2)
+    m0 -= n * 1.5
+
+    u_l.append(u)
+    h_l.append(h0)
+    t_l.append(t)
+
+# отделение певрой ступени
+m0 -= 1500 * 4
+Ft /= 2
+
+
+while h0 <= 170000:
+    t += 1
+    beta = 90 * (1 - h0 / 170000)
+
+    a_x = ((Ft - F_sopr(h0, u_x) - m0 * g(h0)) * math.cos(beta / 180 * math.pi)) / m0 * 0
+    a_y = ((Ft - F_sopr(h0, u_y) - m0 * g(h0)) * math.sin(beta / 180 * math.pi)) / m0
+    u_x += a_x
+    u_y += a_y
+    h_x = h_x + u_x + a_x / 2
+    h_y = h_y + u_y + a_y / 2
+
+    u = math.sqrt(u_x ** 2 + u_y ** 2)
+    h0 = math.sqrt(h_x ** 2 + h_y ** 2)
+    m0 -= n * 1.5
+
+    u_l.append(u)
+    h_l.append(h0)
+    t_l.append(t)
+
+
+plt.figure(figsize=(5, 2.7), layout='constrained')
+plt.plot(t_l, h_l, label='Мат. модель')  # Plot some data on the (implicit) Axes.
+plt.xlabel('время полета')
+plt.ylabel('высота полета')
+plt.title("График зависимости высоты полета от времени")
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(3, 1.5), layout='constrained')
+plt.plot(t_l, u_l, label='Мат. модель')
+plt.xlabel('время полета')
+plt.ylabel('скорость полета')
+plt.title("График зависимости скорости полета от времени")
+plt.legend()
+
+plt.show()
+
+
+def main():
+    # Подключение к серверу kRPC
+    conn = krpc.connect(name='Space M')
+
+    # Получение информации об активном "судне"
+    vessel = conn.space_center.active_vessel
+
+    # получение информации о небесном теле - Луне
+    body = vessel.orbit.body
+    ref_frame = vessel.orbit.body.reference_frame
+
+    # Открытие csv файла
+    w_file = open("KSP data.csv", mode="w", encoding="UTF-8")
+    fieldnames = ['Time since maneuver start', 'Periasis', 'Velocity']
+    writer = csv.DictWriter(w_file, fieldnames=fieldnames)
+    writer.writeheader()
+    # Инициализация списков для хранения данных
+    velocity_data = []
+    time_data = []
+    periasis_data = []
+
+    try:
+        # Ждем, пока не зарабоатет двигатель Луны-25
+        while vessel.control.throttle == 0:
+            print(conn.space_center.ut, vessel.control.throttle)
+            time.sleep(0.5)
+        # Маневр начался. Считываем данные, пока работает двигатель
+        time_start = round(conn.space_center.ut, 2)
+        while vessel.control.throttle > 0:
+            # Получение текущего  времени
+            cur_time = round(conn.space_center.ut, 2)
+            time_since_m = cur_time - time_start
+            # Получение текущей скорости
+            velocity = round(vessel.flight(body.orbital_reference_frame).speed, 5)
+            # Получение текущего перигея
+            periasis = vessel.flight(ref_frame).mean_altitude#periasis = vessel.flight(ref_frame).mean_altitude#periasis = round(vessel.orbit.periapsis_altitude, 5)#round(vessel.flight(body.orbital_reference_frame).speed, 5)
+            # Запись данных
+            velocity_data.append(velocity)
+            periasis_data.append(periasis)
+            time_data.append(round(time_since_m, 2))
+            print(time_since_m, cur_time, velocity, vessel.orbit.time_to_apoapsis, vessel.control.throttle)
+            # Задержка перед следующим измерением
+            time.sleep(1)
+
+
+    except KeyboardInterrupt:
+        print('Программа завершена пользователем.')
+
+    finally:
+        # Закрытие соединения с сервером kRPC
+        conn.close()
+        # Запись полученных данных в csv файл, закрытие файла
+        for n in range(len(time_data)):
+            writer.writerow(
+                {'Time since maneuver start': time_data[n], 'Periasis': periasis_data[n], 'Velocity': velocity_data[n]})
+        w_file.close()
+
+    # Инициализируем функции, вычисляющие данные, основанные на мат модели
+
+    def VotT(t, m, V2, F):
+        return (m * V2 - F * t) / m
+
+    def G2V(R, G1, m, mu, V):
+        return (((R + G1) * 2 * mu) / (2 * mu - ((R + G1) * (V ** 2)))) - 2 * R - G1
+
+    def G2R(R, G1, m, mu, V2, t):
+        return (((R + G1) * 2 * mu * (m ** 2)) / (2 * (m ** 2) * mu - (R + G1) * (m * V2 - F * t) ** 2)) - 2 * R - G1
+
+    # Циклы, вычисляющие необходимые зависимости
+
+    for Vi in range(1634, 1606, -1):
+        peri_ot_V.append(G2V(R, G1, m, mu, Vi))
+        Scorost.append(Vi)
+
+    for t in range(0, 127):
+        peri_ot_t.append(G2R(R, G1, m, mu, V2, t))
+        Time.append(t)
+
+    for t in range(t_engine + 1):
+        time2.append(t)
+        V1.append(VotT(t, m, V2, F))
+    # Построение графиков
+
+    plt.plot(t_l, h_l, label='Мат. модель', lw=2.2)
+    plt.plot(time_data, periasis_data, label="Данные из KSP", lw=2.2)
+    plt.xlabel('Время (секунды)')
+    plt.ylabel('Высота полёта (м)')
+    plt.title('График зависимости высоты полёта от времени работы двигателя')
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+
+    plt.plot(Scorost, peri_ot_V, label="Данные из Мат. модели", lw=2.2)
+    plt.plot(velocity_data, periasis_data, label="Данные из KSP", lw=2.3)
+    plt.xlabel('Скорость аппарата (м/c)')
+    plt.ylabel('Перигей (метры)')
+    plt.title('График зависимости Перигея от орбитальной скорости аппарата')
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+
+    plt.plot(time2, V1, label="Данные из Мат. модели", lw=2.2)
+    plt.plot(time_data, velocity_data, label="Данные из KSP", lw=2.3)
+    plt.xlabel('Время работы двигателя (c)')
+    plt.ylabel('Скорость аппарата (м/c)')
+    plt.title('График зависимости орбитальной скорости аппарата от времени работы двигателя')
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+
+
+if __name__ == '__main__':
+    main()
 
